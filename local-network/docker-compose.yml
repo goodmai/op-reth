@@ -1,0 +1,205 @@
+name: op-reth-local-network
+version: "3.8"
+
+services:
+  # Consensus Client 1: Lighthouse
+  lighthouse-node-1:
+    container_name: lighthouse-node-1
+    image: sigp/lighthouse:latest-modern
+    command: >
+      lighthouse bn
+      --testnet-dir=/data/testnet
+      --staking
+      --http
+      --http-address=0.0.0.0
+      --http-port=5052
+      --disable-enr-auto-update
+      --target-peers=1
+      --execution-endpoint=http://op-geth-1:8551
+      --execution-jwt=/data/jwtsecret.hex
+      --disable-deposit-contract-sync
+      --port=9000
+    ports:
+      - "127.0.0.1:5052:5052"  # Beacon API
+      - "127.0.0.1:9000:9000/udp"  # P2P UDP
+      - "127.0.0.1:9000:9000/tcp"  # P2P TCP
+    volumes:
+      - ./configs/consensus:/data/testnet
+      - ./secrets/jwtsecret.hex:/data/jwtsecret.hex:ro
+      - lighthouse-data-1:/data
+    depends_on:
+      - op-geth-1
+    networks:
+      - op-network
+
+  # Validator Client 1: Lighthouse
+  lighthouse-validator-1:
+    container_name: lighthouse-validator-1
+    image: sigp/lighthouse:latest-modern
+    command: >
+      lighthouse vc
+      --beacon-nodes=http://lighthouse-node-1:5052
+      --testnet-dir=/data/testnet
+      --suggested-fee-recipient=0x123463a4b065722e99115d6c222f267d9cabb524
+      --disable-run-on-all
+      --http
+      --http-address=0.0.0.0
+      --http-port=5062
+    ports:
+      - "127.0.0.1:5062:5062"
+    volumes:
+      - ./configs/consensus:/data/testnet
+      - ./secrets/validator-keys-1:/data/validator_keys:ro
+      - lighthouse-validator-data-1:/data
+    depends_on:
+      - lighthouse-node-1
+    networks:
+      - op-network
+
+  # Consensus Client 2: Lighthouse (second instance)
+  lighthouse-node-2:
+    container_name: lighthouse-node-2
+    image: sigp/lighthouse:latest-modern
+    command: >
+      lighthouse bn
+      --testnet-dir=/data/testnet
+      --staking
+      --http
+      --http-address=0.0.0.0
+      --http-port=5052
+      --disable-enr-auto-update
+      --target-peers=1
+      --execution-endpoint=http://op-reth-2:8551
+      --execution-jwt=/data/jwtsecret.hex
+      --disable-deposit-contract-sync
+      --port=9000
+    ports:
+      - "127.0.0.1:5053:5052"  # Beacon API
+      - "127.0.0.1:9001:9000/udp"  # P2P UDP
+      - "127.0.0.1:9001:9000/tcp"  # P2P TCP
+    volumes:
+      - ./configs/consensus:/data/testnet
+      - ./secrets/jwtsecret.hex:/data/jwtsecret.hex:ro
+      - lighthouse-data-2:/data
+    depends_on:
+      - op-reth-2
+    networks:
+      - op-network
+
+  # Validator Client 2: Lighthouse
+  lighthouse-validator-2:
+    container_name: lighthouse-validator-2
+    image: sigp/lighthouse:latest-modern
+    command: >
+      lighthouse vc
+      --beacon-nodes=http://lighthouse-node-2:5052
+      --testnet-dir=/data/testnet
+      --suggested-fee-recipient=0x123463a4b065722e99115d6c222f267d9cabb524
+      --disable-run-on-all
+      --http
+      --http-address=0.0.0.0
+      --http-port=5062
+    ports:
+      - "127.0.0.1:5063:5062"
+    volumes:
+      - ./configs/consensus:/data/testnet
+      - ./secrets/validator-keys-2:/data/validator_keys:ro
+      - lighthouse-validator-data-2:/data
+    depends_on:
+      - lighthouse-node-2
+    networks:
+      - op-network
+
+  # Execution Client 1: op-geth (standard)
+  op-geth-1:
+    container_name: op-geth-1
+    image: ghcr.io/unitsnetwork/op-geth:v1.101603.0-1
+    command: >
+      --datadir=/data
+      --http
+      --http.addr=0.0.0.0
+      --http.port=8545
+      --http.api=admin,txpool,net,web3,eth,engine,debug,trace
+      --http.corsdomain="*"
+      --http.vhosts="*"
+      --authrpc.addr=0.0.0.0
+      --authrpc.port=8551
+      --authrpc.vhosts="*"
+      --authrpc.jwtsecret=/etc/jwtsecret.hex
+      --ws
+      --ws.addr=0.0.0.0
+      --ws.port=8546
+      --ws.api=admin,txpool,net,web3,eth,engine
+      --ws.origins="*"
+      --syncmode=full
+      --port=30303
+      --networkid=1337
+      --gcmode=full
+      --bootnodes=enode://c14526defe18c2e0d82b6f9ac30e5d816389da77f1f0b2fd906662d3cb4e8a722dc9a0e9c5ec5e0c68fd47be7d23fb0e2b2c46a02eef2e1a33a56e97c7c1b58@op-geth-1:30303?discport=0,enode://c14526defe18c2e0d82b6f9ac30e5d816389da77f1f0b2fd906662d3cb4e8a722dc9a0e9c5ec5e0c68fd47be7d23fb0e2b2c46a02eef2e1a33a56e97c7c1b58@op-reth-2:30303?discport=0
+    ports:
+      - "127.0.0.1:8545:8545"  # RPC HTTP
+      - "127.0.0.1:8546:8546"  # RPC WebSocket
+      - "127.0.0.1:18551:8551" # Engine API
+      - "127.0.0.1:40303:30303" # P2P TCP
+      - "127.0.0.1:40303:30303/udp"  # P2P UDP
+    volumes:
+      - ./configs/geth:/data
+      - ./secrets/jwtsecret.hex:/etc/jwtsecret.hex:ro
+      - ./configs/genesis.json:/tmp/genesis.json:ro
+      - op-geth-data-1:/data
+    environment:
+      - GETH_NODE_NUMBER=1
+    networks:
+      - op-network
+
+  # Execution Client 2: op-reth with eth_simulateV1
+  op-reth-2:
+    container_name: op-reth-2
+    image: ghcr.io/unitsnetwork/op-reth:simulate-v1-latest
+    command: >
+      node
+      --chain=/tmp/genesis.json
+      --datadir=/data
+      --http
+      --http.addr=0.0.0.0
+      --http.port=8545
+      --http.api=admin,eth,net,web3,txpool,debug,trace,ots,engine
+      --http.corsdomain="*"
+      --authrpc.addr=0.0.0.0
+      --authrpc.port=8551
+      --authrpc.jwtsecret=/etc/jwtsecret.hex
+      --ws
+      --ws.addr=0.0.0.0
+      --ws.port=8546
+      --ws.api=admin,eth,net,web3,txpool,debug,trace,ots,engine
+      --ws.origins="*"
+      --port=30303
+      --network=1337
+      --bootnodes=enode://c14526defe18c2e0d82b6f9ac30e5d816389da77f1f0b2fd906662d3cb4e8a722dc9a0e9c5ec5e0c68fd47be7d23fb0e2b2c46a02eef2e1a33a56e97c7c1b58@op-geth-1:30303?discport=0,enode://c14526defe18c2e0d82b6f9ac30e5d816389da77f1f0b2fd906662d3cb4e8a722dc9a0e9c5ec5e0c68fd47be7d23fb0e2b2c46a02eef2e1a33a56e97c7c1b58@op-reth-2:30303?discport=0
+    ports:
+      - "127.0.0.1:8547:8545"  # RPC HTTP
+      - "127.0.0.1:8548:8546"  # RPC WebSocket
+      - "127.0.0.1:28551:8551" # Engine API
+      - "127.0.0.1:50303:30303" # P2P TCP
+      - "127.0.0.1:50303:30303/udp"  # P2P UDP
+    volumes:
+      - ./configs/reth:/data
+      - ./secrets/jwtsecret.hex:/etc/jwtsecret.hex:ro
+      - ./configs/genesis.json:/tmp/genesis.json:ro
+      - op-reth-data-2:/data
+    environment:
+      - RETH_NODE_NUMBER=2
+    networks:
+      - op-network
+
+volumes:
+  op-geth-data-1:
+  op-reth-data-2:
+  lighthouse-data-1:
+  lighthouse-validator-data-1:
+  lighthouse-data-2:
+  lighthouse-validator-data-2:
+
+networks:
+  op-network:
+    driver: bridge
