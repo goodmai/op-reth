@@ -1,0 +1,138 @@
+name: op-reth-local-network
+
+services:
+  # Execution Client 1: Standard op-geth
+  ec-1:
+    container_name: ec-1
+    extends:
+      file: /tmp/consensus-client/docker/services/op-geth.yml
+      service: op-geth
+    environment:
+      NODE_NUMBER: 1
+      GETH_NETWORKID: 1337
+    ports:
+      - "127.0.0.1:18551:8551" # Engine port
+      - "127.0.0.1:18545:8545" # RPC port
+      - "127.0.0.1:18546:8546" # WebSocket
+    volumes:
+      - ./logs/ec-1:/root/logs
+      - ./configs/ec-common/p2p-key-1.hex:/etc/secrets/p2p-key:ro
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/ec-common/config.toml:/etc/config.toml:ro
+      - ./configs/ec-common/genesis.json:/tmp/genesis.json:ro
+
+  # Execution Client 2: Modified op-reth with eth_simulateV1
+  ec-2:
+    container_name: ec-2
+    image: ghcr.io/unitsnetwork/op-reth:simulate-v1-latest
+    stop_grace_period: 5m
+    environment:
+      RETH_LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:28551:8551" # Engine port
+      - "127.0.0.1:28545:8545" # RPC port
+      - "127.0.0.1:28546:8546" # WebSocket
+      - "127.0.0.1:23030:30303" # P2P
+      - "127.0.0.1:23031:30303/udp"
+    volumes:
+      - ec-2-data:/root/.local/share/reth
+      - ./logs/ec-2:/root/logs
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/ec-common/genesis.json:/tmp/genesis.json:ro
+      - ./configs/ec-common/p2p-key-2.hex:/etc/secrets/p2p-key:ro
+    healthcheck:
+      test: ["CMD", "reth", "--datadir", "/root/.local/share/reth", "node-info"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    command: |
+      node
+      --datadir /root/.local/share/reth
+      --chain /tmp/genesis.json
+      --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3,debug,txpool,admin,trace --http.corsdomain "*"
+      --ws --ws.addr 0.0.0.0 --ws.port 8546
+      --authrpc.addr 0.0.0.0 --authrpc.port 8551 --authrpc.jwtsecret /etc/secrets/jwtsecret
+      --port 30303
+      --log.file.directory /root/logs
+      --bootnodes enode://$(cat /etc/secrets/p2p-key | xxd -r -p | openssl sha256 -binary | xxd -p -c 32)@ec-1:30303
+
+  # Consensus Client 1: Waves Node
+  waves-node-1:
+    container_name: waves-node-1
+    extends:
+      file: /tmp/consensus-client/docker/services/consensus-client.yml
+      service: consensus-client
+    ports:
+      - "127.0.0.1:16869:6869"
+    environment:
+      NODE_NUMBER: 1
+      WAVES_WALLET_SEED: HnyGuCEnV1A
+      JAVA_OPTS: -Dlogback.file.level=TRACE -Xmx2g
+    volumes:
+      - ./logs/waves-node-1:/var/log/waves
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/wavesnode:/etc/waves:ro
+    depends_on:
+      ec-1:
+        condition: service_healthy
+
+  # Consensus Client 2: Waves Node
+  waves-node-2:
+    container_name: waves-node-2
+    extends:
+      file: /tmp/consensus-client/docker/services/consensus-client.yml
+      service: consensus-client
+    ports:
+      - "127.0.0.1:26869:6869"
+    environment:
+      NODE_NUMBER: 2
+      WAVES_WALLET_SEED: HnyGuCEnV1B
+      JAVA_OPTS: -Dlogback.file.level=TRACE -Xmx2g
+    volumes:
+      - ./logs/waves-node-2:/var/log/waves
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/wavesnode:/etc/waves:ro
+    depends_on:
+      ec-2:
+        condition: service_healthy
+
+  # Update genesis configuration
+  update-genesis:
+    container_name: update-genesis
+    image: ghcr.io/wavesplatform/wes:latest
+    environment:
+      JAVA_OPTS: -Xmx1g
+    volumes:
+      - ./configs/wavesnode:/tmp/configs
+    command:
+      - gengen
+      - /tmp/configs/genesis-template.conf
+      - /tmp/configs/genesis.conf
+
+  # Deploy contracts and setup
+  deploy:
+    container_name: deploy
+    extends:
+      file: /tmp/consensus-client/docker/services/consensus-client.yml
+      service: consensus-client
+    environment:
+      MAIN: deploy.py
+      JAVA_OPTS: -Xmx1g
+    volumes:
+      - ./logs/deploy:/var/log/waves
+      - ./configs/wavesnode:/etc/waves:ro
+    depends_on:
+      waves-node-1:
+        condition: service_healthy
+      ec-1:
+        condition: service_healthy
+
+volumes:
+  ec-1-data:
+  ec-2-data:
+
+networks:
+  default:
+    name: l2-network
+    driver: bridge

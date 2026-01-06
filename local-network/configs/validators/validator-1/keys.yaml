@@ -1,0 +1,7 @@
+# Validator keys for validator-1
+# This is a minimal setup for local testing with 1 validator
+
+validators:
+  - pubkey: "0xa99a76ed7796f7be22e5e09af6153b8f9778c7d3a3c68f023b5e93b23a7e7b2c0e6a8d8e2c3e1f0a7b9c8d7e6f5a4b3"
+    enabled: true
+    suggested_fee_recipient: "0xfe3b557e8fb62b89f4916b721be55ceb828dbd73"

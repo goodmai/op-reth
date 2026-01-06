@@ -1,0 +1,85 @@
+services:
+  redis:
+    extends:
+      file: ./redis/redis.yml
+      service: redis
+    profiles: [ bs ]
+
+  # db-init:
+  #   extends:
+  #     file: ./services/db.yml
+  #     service: db-init
+
+  db:
+    # depends_on:
+    #   db-init:
+    #     condition: service_completed_successfully
+    extends:
+      file: ./db/db.yml
+      service: db
+    profiles: [ bs ]
+
+  backend:
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      ec-1:
+        condition: service_healthy
+    extends:
+      file: ./backend/backend.yml
+      service: backend
+    profiles: [ bs ]
+
+  # visualizer:
+  #   extends:
+  #     file: ./services/visualizer.yml
+  #     service: visualizer
+
+  sig-provider:
+    extends:
+      file: ./sig-provider/sig-provider.yml
+      service: sig-provider
+    profiles: [ bs ]
+
+  frontend:
+    depends_on:
+      - backend
+    extends:
+      file: ./frontend/frontend.yml
+      service: frontend
+    profiles: [ bs ]
+
+  # stats-db-init:
+  #   extends:
+  #     file: ./services/stats.yml
+  #     service: stats-db-init
+
+  stats-db:
+    # depends_on:
+    #   stats-db-init:
+    #     condition: service_completed_successfully
+    extends:
+      file: ./stats/stats.yml
+      service: stats-db
+    profiles: [ bs ]
+
+  stats:
+    depends_on:
+      - stats-db
+      - backend
+    extends:
+      file: ./stats/stats.yml
+      service: stats
+    profiles: [ bs ]
+
+  nginx:
+    depends_on:
+      - backend
+      - frontend
+      - stats
+    extends:
+      file: ./nginx/nginx.yml
+      service: nginx
+    profiles: [ bs ]

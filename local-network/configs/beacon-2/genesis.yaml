@@ -1,0 +1,21 @@
+# Beacon chain genesis state for local development network
+
+# Genesis time
+genesis_time: 0
+
+# Genesis fork version
+genesis_fork_version: "0x00001337"
+
+# Initial validator set (minimum 1 validator for local testing)
+initial_validator_set:
+  - pubkey: "0xa99a76ed7796f7be22e5e09af6153b8f9778c7d3a3c68f023b5e93b23a7e7b2c0e6a8d8e2c3e1f0a7b9c8d7e6f5a4b3"
+    withdrawal_credentials: "0x010000000000000000000000fe3b557e8fb62b89f4916b721be55ceb828dbd73"
+    amount: 32000000000
+
+# Genesis execution payload
+eth1_data:
+  deposit_root: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  deposit_count: 0
+  block_hash: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+deposit_contract_address: "0x0000000000000000000000000000000000000000"

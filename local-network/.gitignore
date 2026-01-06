@@ -1,0 +1,27 @@
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+
+# Data volumes (if not using named volumes)
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+
+# Testing artifacts
+TESTING_REPORT.md
+*.test.json
