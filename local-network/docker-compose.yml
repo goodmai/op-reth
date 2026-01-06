@@ -1,0 +1,248 @@
+name: op-reth-local-network
+
+services:
+  # Execution Client 1: Standard op-geth
+  ec-1:
+    container_name: ec-1
+    image: ghcr.io/unitsnetwork/op-geth:v1.101603.0-1
+    stop_grace_period: 5m
+    entrypoint: /bin/sh -c
+    environment:
+      GETH_BOOTNODES: ""
+      GETH_CONFIG: /etc/config.toml
+      GETH_LOG_FILE: /root/logs/op-geth.log
+      GETH_VERBOSITY: 3
+      GETH_LOG_FORMAT: terminal
+      GETH_NETWORKID: 1337
+    ports:
+      - "127.0.0.1:18545:8545"  # RPC port
+      - "127.0.0.1:18546:8546"  # WebSocket
+      - "127.0.0.1:18551:8551"  # Engine port
+      - "127.0.0.1:13030:30303" # P2P
+      - "127.0.0.1:13031:30303/udp"
+    volumes:
+      - ec-1-data:/root/.ethereum
+      - ./logs/ec-1:/root/logs
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/ec-common/config.toml:/etc/config.toml:ro
+      - ./configs/ec-common/genesis.json:/tmp/genesis.json:ro
+      - ./configs/ec-common/p2p-key-1.hex:/etc/secrets/p2p-key:ro
+    networks:
+      - l2-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null --header 'content-type: application/json' --post-data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' http://127.0.0.1:8545 || exit 1"]
+      interval: 5s
+      timeout: 1s
+      retries: 10
+    logging:
+      driver: local
+      options:
+        max-size: 1g
+        max-file: 5
+    command:
+      - |
+        if [ ! -d /root/.ethereum/geth/chaindata ] ; then
+          echo "Initializing geth with genesis..."
+          geth init /tmp/genesis.json
+        else
+          echo "geth already initialized"
+        fi
+        exec geth \
+        --syncmode=full \
+        --verbosity=3 \
+        --http \
+        --http.addr=0.0.0.0 \
+        --http.vhosts=* \
+        --http.api=eth,web3,txpool,net,debug,engine \
+        --http.corsdomain=* \
+        --ws \
+        --ws.addr=0.0.0.0 \
+        --ws.api=eth,web3,txpool,net,debug \
+        --ws.rpcprefix=/ \
+        --ws.origins=* \
+        --authrpc.addr=0.0.0.0 \
+        --authrpc.vhosts=* \
+        --authrpc.jwtsecret=/etc/secrets/jwtsecret \
+        --nodekey=/etc/secrets/p2p-key \
+        --port=30303
+
+  # Execution Client 2: Modified op-reth with eth_simulateV1
+  ec-2:
+    container_name: ec-2
+    image: ghcr.io/unitsnetwork/op-reth:simulate-v1-latest
+    stop_grace_period: 5m
+    entrypoint: /bin/sh -c
+    environment:
+      RETH_LOG_FILE: /root/logs/op-reth.log
+    ports:
+      - "127.0.0.1:28545:8545"  # RPC port
+      - "127.0.0.1:28546:8546"  # WebSocket
+      - "127.0.0.1:28551:8551"  # Engine port
+      - "127.0.0.1:23030:30303" # P2P
+      - "127.0.0.1:23031:30303/udp"
+    volumes:
+      - ec-2-data:/root/.local/share/reth
+      - ./logs/ec-2:/root/logs
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/ec-common/config.toml:/etc/config.toml:ro
+      - ./configs/ec-common/genesis.json:/tmp/genesis.json:ro
+      - ./configs/ec-common/p2p-key-2.hex:/etc/secrets/p2p-key:ro
+    networks:
+      - l2-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null --header 'content-type: application/json' --post-data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' http://127.0.0.1:8545 || exit 1"]
+      interval: 5s
+      timeout: 1s
+      retries: 20
+    logging:
+      driver: local
+      options:
+        max-size: 1g
+        max-file: 5
+    command:
+      - |
+        if [ ! -d /root/.local/share/reth/db ] ; then
+          echo "Initializing reth with genesis..."
+          reth db init --chain /tmp/genesis.json --datadir /root/.local/share/reth
+        else
+          echo "reth already initialized"
+        fi
+        exec reth node \
+        --datadir /root/.local/share/reth \
+        --chain /tmp/genesis.json \
+        --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3,debug,txpool,admin,trace --http.corsdomain "*" \
+        --ws --ws.addr 0.0.0.0 --ws.port 8546 \
+        --authrpc.addr 0.0.0.0 --authrpc.port 8551 --authrpc.jwtsecret /etc/secrets/jwtsecret \
+        --port 30303 \
+        --log.file.directory /root/logs
+
+  # Consensus Client 1: Lighthouse connected to ec-1
+  beacon-1:
+    container_name: beacon-1
+    image: sigp/lighthouse:latest-modern
+    restart: unless-stopped
+    environment:
+      - LH_NETWORK=custom
+      - LH_DATADIR=/root/.lighthouse
+      - LH_DEBUG_LEVEL=info
+    ports:
+      - "127.0.0.1:19000:9000/tcp"  # Libp2p
+      - "127.0.0.1:19001:9000/udp"
+      - "127.0.0.1:19002:5052"       # HTTP API
+    volumes:
+      - beacon-1-data:/root/.lighthouse
+      - ./logs/beacon-1:/root/logs
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/beacon-1:/etc/lighthouse:ro
+    networks:
+      - l2-network
+    depends_on:
+      ec-1:
+        condition: service_healthy
+    command: |
+      beacon_node
+      --datadir /root/.lighthouse
+      --testnet-dir /etc/lighthouse
+      --staking
+      --http --http-address 0.0.0.0 --http-port 5052
+      --execution-endpoint http://ec-1:8551
+      --execution-jwt /etc/secrets/jwtsecret
+      --disable-enr-auto-update
+      --disable-peer-scoring
+      --disable-packet-filter
+
+  # Consensus Client 2: Lighthouse connected to ec-2
+  beacon-2:
+    container_name: beacon-2
+    image: sigp/lighthouse:latest-modern
+    restart: unless-stopped
+    environment:
+      - LH_NETWORK=custom
+      - LH_DATADIR=/root/.lighthouse
+      - LH_DEBUG_LEVEL=info
+    ports:
+      - "127.0.0.1:29000:9000/tcp"  # Libp2p
+      - "127.0.0.1:29001:9000/udp"
+      - "127.0.0.1:29002:5052"       # HTTP API
+    volumes:
+      - beacon-2-data:/root/.lighthouse
+      - ./logs/beacon-2:/root/logs
+      - ./configs/ec-common/jwtsecret.hex:/etc/secrets/jwtsecret:ro
+      - ./configs/beacon-2:/etc/lighthouse:ro
+    networks:
+      - l2-network
+    depends_on:
+      ec-2:
+        condition: service_healthy
+    command: |
+      beacon_node
+      --datadir /root/.lighthouse
+      --testnet-dir /etc/lighthouse
+      --staking
+      --http --http-address 0.0.0.0 --http-port 5052
+      --execution-endpoint http://ec-2:8551
+      --execution-jwt /etc/secrets/jwtsecret
+      --disable-enr-auto-update
+      --disable-peer-scoring
+      --disable-packet-filter
+      --boot-nodes enr:-HW4QNFXfFX5A5VHs8KnKp3xJDb3tB8Iu5OJ8zcm9pP0BUjXoPKuGIyIbOQ23hjyhvA1X4jeOqpupXr5n3G5jtD6NqGAYoUhYhEmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQO7MIhSihSw1hmqDmq7f5ARzAgDtZM3b1rDSE0qny6A2YN0Y3CCNAaDdWRwgkE5
+
+  # Validator Client 1
+  validator-1:
+    container_name: validator-1
+    image: sigp/lighthouse:latest-modern
+    restart: unless-stopped
+    environment:
+      - LH_DATADIR=/root/.lighthouse
+      - LH_DEBUG_LEVEL=info
+    volumes:
+      - beacon-1-data:/root/.lighthouse
+      - ./configs/validators/validator-1:/etc/validator:ro
+    networks:
+      - l2-network
+    depends_on:
+      beacon-1:
+        condition: service_started
+    command: |
+      validator_client
+      --datadir /root/.lighthouse
+      --testnet-dir /etc/lighthouse
+      --beacon-nodes http://beacon-1:5052
+      --suggested-fee-recipient 0xfe3b557e8fb62b89f4916b721be55ceb828dbd73
+      --disable-run-on-all
+      --enable-doppelganger-protection
+
+  # Validator Client 2
+  validator-2:
+    container_name: validator-2
+    image: sigp/lighthouse:latest-modern
+    restart: unless-stopped
+    environment:
+      - LH_DATADIR=/root/.lighthouse
+      - LH_DEBUG_LEVEL=info
+    volumes:
+      - beacon-2-data:/root/.lighthouse
+      - ./configs/validators/validator-1:/etc/validator:ro
+    networks:
+      - l2-network
+    depends_on:
+      beacon-2:
+        condition: service_started
+    command: |
+      validator_client
+      --datadir /root/.lighthouse
+      --testnet-dir /etc/lighthouse
+      --beacon-nodes http://beacon-2:5052
+      --suggested-fee-recipient 0xcF0b9E13FDd593f4Ca26D36aFCaA44dd3FDCCbeD
+      --disable-run-on-all
+      --enable-doppelganger-protection
+
+volumes:
+  ec-1-data:
+  ec-2-data:
+  beacon-1-data:
+  beacon-2-data:
+
+networks:
+  l2-network:
+    driver: bridge

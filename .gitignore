@@ -1,0 +1,6 @@
+# Logs
+*.log
+logs/
+
+# Temporary files
+/local-network/docker-compose.yml.ref

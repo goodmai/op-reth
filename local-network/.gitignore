@@ -1,0 +1,12 @@
+# Docker volumes
+*-data/
+
+# Logs
+logs/
+
+# Environment variables
+.env
+
+# Temporary files
+*.tmp
+*.ref
