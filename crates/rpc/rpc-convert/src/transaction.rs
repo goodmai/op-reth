@@ -871,15 +871,18 @@ where
 pub mod op {
     use super::*;
     use alloy_consensus::SignableTransaction;
+    use alloy_evm::{EvmEnv, Spec};
     use alloy_signer::Signature;
     use op_alloy_consensus::{
         transaction::{OpDepositInfo, OpTransactionInfo},
-        OpTxEnvelope,
+        DEPOSIT_TX_TYPE_ID, OpTxEnvelope,
     };
     use op_alloy_rpc_types::OpTransactionRequest;
+    use op_revm::{OptimismFields, OpTxEnv};
     use reth_optimism_primitives::DepositReceipt;
     use reth_primitives_traits::SignedTransaction;
     use reth_storage_api::{errors::ProviderError, ReceiptProvider};
+    use revm::context::BlockEnv;
 
     /// Creates [`OpTransactionInfo`] by adding [`OpDepositInfo`] to [`TransactionInfo`] if `tx` is
     /// a deposit.
@@ -932,6 +935,83 @@ pub mod op {
             let signature = Signature::new(Default::default(), Default::default(), false);
 
             Ok(tx.into_signed(signature).into())
+        }
+    }
+
+    impl TryIntoTxEnv<OpTxEnv> for OpTransactionRequest {
+        type Err = alloy_evm::rpc::EthTxEnvError;
+
+        fn try_into_tx_env<Spec: Spec>(
+            self,
+            evm_env: &EvmEnv<Spec, BlockEnv>,
+        ) -> Result<OpTxEnv, Self::Err> {
+            // Check if this is a deposit transaction (Type 0x7E = 126)
+            let is_deposit = self
+                .transaction_type()
+                .map(|ty| ty.to::<u8>() == DEPOSIT_TX_TYPE_ID)
+                .unwrap_or(false);
+
+            if is_deposit {
+                // For deposit transactions, we need to set up TxEnv directly
+                // without ecrecover signature verification
+                let mut tx_env = OpTxEnv::default();
+
+                // Set caller directly from `from` field (no signature verification)
+                // For deposit transactions, the caller is trusted from the request
+                if let Some(from) = self.from() {
+                    tx_env.caller = from;
+                }
+
+                // Set gas limit
+                tx_env.gas_limit = self.gas_limit().unwrap_or(30_000_000);
+
+                // Set gas price (usually 0 for deposits)
+                if let Some(gas_price) = self.gas_price() {
+                    tx_env.gas_price = gas_price;
+                }
+
+                // Set nonce to 0 for deposit transactions
+                tx_env.nonce = Some(0);
+
+                // Fill other fields from the request
+                if let Some(to) = self.to() {
+                    tx_env.transact_to = to;
+                }
+
+                if let Some(value) = self.value() {
+                    tx_env.value = value;
+                }
+
+                if let Some(input) = self.input() {
+                    tx_env.data = input.clone();
+                }
+
+                // Set Optimism-specific fields for deposit transactions
+                // mint: amount of ETH to mint on L2
+                // source_hash: hash that uniquely identifies the deposit source
+                // is_system_transaction: false for user deposits
+                tx_env.optimism = Some(OptimismFields {
+                    source_hash: self.source_hash(),
+                    mint: self.mint(),
+                    is_system_transaction: Some(false),
+                    enveloped_tx: None,
+                });
+
+                Ok(tx_env)
+            } else {
+                // For non-deposit transactions, use the default conversion
+                // This delegates to the standard TransactionRequest conversion
+                let tx_request: TransactionRequest = self.into();
+                tx_request.try_into_tx_env(evm_env).map_err(|e| {
+                    // Convert the error type
+                    match e {
+                        alloy_evm::rpc::EthTxEnvError::InvalidRecipient(_) => {
+                            alloy_evm::rpc::EthTxEnvError::InvalidRecipient(alloy_primitives::Address::ZERO)
+                        }
+                        _ => alloy_evm::rpc::EthTxEnvError::Other(e.to_string()),
+                    }
+                })
+            }
         }
     }
 }
