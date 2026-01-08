@@ -144,6 +144,15 @@ pub trait RpcConvert: Send + Sync + Unpin + Debug + DynClone + 'static {
         tx_info: TransactionInfo,
     ) -> Result<RpcTransaction<Self::Network>, Self::Error>;
 
+    /// semi-standard JSON-RPC request to `TxTy` primitives.
+    ///
+    /// This is needed to support custom transaction fields (like Optimism Deposit) that are lost
+    /// during standard deserialization to rigid types.
+    fn build_simulate_v1_transaction_from_json(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<TxTy<Self::Primitives>, Self::Error>;
+
     /// Builds a fake transaction from a transaction request for inclusion into block built in
     /// `eth_simulateV1`.
     fn build_simulate_v1_transaction(
@@ -315,6 +324,26 @@ where
 
     fn convert_rpc_tx(&self, tx: Tx, signer: Address, tx_info: TxInfo) -> Result<RpcTx, Self::Err> {
         self(tx, signer, tx_info)
+    }
+}
+
+/// Converts JSON `Value` into `SimTx`.
+///
+/// This allows handling raw JSON payloads for simulation, bypassing strict type definitions
+/// that may be missing fields (like Optimism Deposit).
+pub trait JsonSimTxConverter<SimTx>: Clone + Debug + Unpin + Send + Sync + 'static {
+    /// An associated error type.
+    type Error: Error;
+
+    /// Converts JSON value to simulation transaction.
+    fn convert_json_sim_tx(&self, request: serde_json::Value) -> Result<SimTx, Self::Error>;
+}
+
+impl<SimTx> JsonSimTxConverter<SimTx> for () {
+    type Error = ValueError<String>;
+
+    fn convert_json_sim_tx(&self, _request: serde_json::Value) -> Result<SimTx, Self::Error> {
+        Err(ValueError::new("JSON conversion not supported".to_string(), "Use standard types"))
     }
 }
 
@@ -518,6 +547,7 @@ pub struct RpcConverter<
     SimTx = (),
     RpcTx = (),
     TxEnv = (),
+    JsonSimTx = (),
 > {
     network: PhantomData<Network>,
     evm: PhantomData<Evm>,
@@ -527,6 +557,7 @@ pub struct RpcConverter<
     tx_env_converter: TxEnv,
     sim_tx_converter: SimTx,
     rpc_tx_converter: RpcTx,
+    json_sim_tx_converter: JsonSimTx,
 }
 
 impl<Network, Evm, Receipt> RpcConverter<Network, Evm, Receipt> {
@@ -541,17 +572,18 @@ impl<Network, Evm, Receipt> RpcConverter<Network, Evm, Receipt> {
             tx_env_converter: (),
             sim_tx_converter: (),
             rpc_tx_converter: (),
+            json_sim_tx_converter: (),
         }
     }
 }
 
-impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
-    RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
+impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx>
+    RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx>
 {
     /// Converts the network type
     pub fn with_network<N>(
         self,
-    ) -> RpcConverter<N, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv> {
+    ) -> RpcConverter<N, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter,
@@ -560,6 +592,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
             ..
         } = self;
         RpcConverter {
@@ -571,6 +604,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -578,7 +612,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     pub fn with_tx_env_converter<TxEnvNew>(
         self,
         tx_env_converter: TxEnvNew,
-    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnvNew> {
+    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnvNew, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter,
@@ -588,6 +622,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter: _,
+            json_sim_tx_converter,
             ..
         } = self;
         RpcConverter {
@@ -599,6 +634,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -606,7 +642,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     pub fn with_header_converter<HeaderNew>(
         self,
         header_converter: HeaderNew,
-    ) -> RpcConverter<Network, Evm, Receipt, HeaderNew, Map, SimTx, RpcTx, TxEnv> {
+    ) -> RpcConverter<Network, Evm, Receipt, HeaderNew, Map, SimTx, RpcTx, TxEnv, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter: _,
@@ -616,6 +652,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         } = self;
         RpcConverter {
             receipt_converter,
@@ -626,6 +663,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -633,7 +671,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     pub fn with_mapper<MapNew>(
         self,
         mapper: MapNew,
-    ) -> RpcConverter<Network, Evm, Receipt, Header, MapNew, SimTx, RpcTx, TxEnv> {
+    ) -> RpcConverter<Network, Evm, Receipt, Header, MapNew, SimTx, RpcTx, TxEnv, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter,
@@ -643,6 +681,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         } = self;
         RpcConverter {
             receipt_converter,
@@ -653,6 +692,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -660,7 +700,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     pub fn with_sim_tx_converter<SimTxNew>(
         self,
         sim_tx_converter: SimTxNew,
-    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTxNew, RpcTx, TxEnv> {
+    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTxNew, RpcTx, TxEnv, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter,
@@ -669,6 +709,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             evm,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
             ..
         } = self;
         RpcConverter {
@@ -680,6 +721,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -687,7 +729,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     pub fn with_rpc_tx_converter<RpcTxNew>(
         self,
         rpc_tx_converter: RpcTxNew,
-    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTxNew, TxEnv> {
+    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTxNew, TxEnv, JsonSimTx> {
         let Self {
             receipt_converter,
             header_converter,
@@ -696,6 +738,7 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             evm,
             sim_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
             ..
         } = self;
         RpcConverter {
@@ -707,6 +750,36 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
             sim_tx_converter,
             rpc_tx_converter,
             tx_env_converter,
+            json_sim_tx_converter,
+        }
+    }
+
+    /// Swaps the JSON simulate transaction converter with `json_sim_tx_converter`.
+    pub fn with_json_sim_tx_converter<JsonSimTxNew>(
+        self,
+        json_sim_tx_converter: JsonSimTxNew,
+    ) -> RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTxNew> {
+        let Self {
+            receipt_converter,
+            header_converter,
+            mapper,
+            network,
+            evm,
+            sim_tx_converter,
+            rpc_tx_converter,
+            tx_env_converter,
+            json_sim_tx_converter: _,
+        } = self;
+        RpcConverter {
+            receipt_converter,
+            header_converter,
+            mapper,
+            network,
+            evm,
+            sim_tx_converter,
+            rpc_tx_converter,
+            tx_env_converter,
+            json_sim_tx_converter,
         }
     }
 
@@ -728,8 +801,8 @@ impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
     }
 }
 
-impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv> Default
-    for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
+impl<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx> Default
+    for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx>
 where
     Receipt: Default,
     Header: Default,
@@ -737,6 +810,7 @@ where
     SimTx: Default,
     RpcTx: Default,
     TxEnv: Default,
+    JsonSimTx: Default,
 {
     fn default() -> Self {
         Self {
@@ -748,6 +822,7 @@ where
             sim_tx_converter: Default::default(),
             rpc_tx_converter: Default::default(),
             tx_env_converter: Default::default(),
+            json_sim_tx_converter: Default::default(),
         }
     }
 }
@@ -761,7 +836,8 @@ impl<
         SimTx: Clone,
         RpcTx: Clone,
         TxEnv: Clone,
-    > Clone for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
+        JsonSimTx: Clone,
+    > Clone for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx>
 {
     fn clone(&self) -> Self {
         Self {
@@ -773,12 +849,13 @@ impl<
             sim_tx_converter: self.sim_tx_converter.clone(),
             rpc_tx_converter: self.rpc_tx_converter.clone(),
             tx_env_converter: self.tx_env_converter.clone(),
+            json_sim_tx_converter: self.json_sim_tx_converter.clone(),
         }
     }
 }
 
-impl<N, Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv> RpcConvert
-    for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv>
+impl<N, Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx> RpcConvert
+    for RpcConverter<Network, Evm, Receipt, Header, Map, SimTx, RpcTx, TxEnv, JsonSimTx>
 where
     N: NodePrimitives,
     Network: RpcTypes<TransactionRequest: SignableTxRequest<N::SignedTx>>,
@@ -807,6 +884,7 @@ where
     RpcTx:
         RpcTxConverter<TxTy<N>, Network::TransactionResponse, <Map as TxInfoMapper<TxTy<N>>>::Out>,
     TxEnv: TxEnvConverter<RpcTxReq<Network>, Evm>,
+    JsonSimTx: JsonSimTxConverter<TxTy<N>>,
 {
     type Primitives = N;
     type Evm = Evm;
@@ -822,6 +900,19 @@ where
         let tx_info = self.mapper.try_map(&tx, tx_info)?;
 
         self.rpc_tx_converter.convert_rpc_tx(tx, signer, tx_info).map_err(Into::into)
+    }
+
+    fn build_simulate_v1_transaction_from_json(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<TxTy<N>, Self::Error> {
+        if let Ok(tx) = self.json_sim_tx_converter.convert_json_sim_tx(request.clone()) {
+            return Ok(tx);
+        }
+
+        let req: RpcTxReq<Network> = serde_json::from_value(request)
+            .map_err(|e| TransactionConversionError::FromTxReq(e.to_string()))?;
+        self.build_simulate_v1_transaction(req)
     }
 
     fn build_simulate_v1_transaction(
@@ -874,8 +965,11 @@ pub mod op {
     use alloy_signer::Signature;
     use op_alloy_consensus::{
         transaction::{OpDepositInfo, OpTransactionInfo},
-        OpTxEnvelope,
+        OpTxEnvelope, TxDeposit,
     };
+    use alloy_consensus::Sealed;
+    use alloy_primitives::{B256, U256};
+    use serde_json::Value;
     use op_alloy_rpc_types::OpTransactionRequest;
     use reth_optimism_primitives::DepositReceipt;
     use reth_primitives_traits::SignedTransaction;
@@ -922,18 +1016,86 @@ pub mod op {
         }
     }
 
-    impl TryIntoSimTx<OpTxEnvelope> for OpTransactionRequest {
+    /// A helper struct for simulating Optimism transactions with support for Deposit fields.
+    /// This is necessary because `op-alloy-rpc-types`'s `OpTransactionRequest` does not currently
+    /// expose `mint` and `sourceHash` fields for direct modification or deserialization in the way we need.
+    #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    pub struct OpSimulateTransactionRequest {
+        /// The inner transaction request fields.
+        #[serde(flatten)]
+        pub inner: alloy_rpc_types_eth::TransactionRequest,
+        /// The mint value for deposit transactions.
+        pub mint: Option<alloy_primitives::U128>,
+        /// The source hash for deposit transactions.
+        #[serde(alias = "source_hash")]
+        pub source_hash: Option<B256>,
+        /// Whether this is a system transaction.
+        #[serde(alias = "is_system_tx")]
+        pub is_system_tx: Option<bool>,
+    }
+
+    impl TryIntoSimTx<OpTxEnvelope> for OpSimulateTransactionRequest {
         fn try_into_sim_tx(self) -> Result<OpTxEnvelope, ValueError<Self>> {
-            let tx = self
-                .build_typed_tx()
-                .map_err(|request| ValueError::new(request, "Required fields missing"))?;
+             // Check for Deposit transaction type (126 or 0x7E)
+             let is_deposit = self.inner.transaction_type.map(|t| t == 126).unwrap_or(false);
 
-            // Create an empty signature for the transaction.
-            let signature = Signature::new(Default::default(), Default::default(), false);
+             if is_deposit {
+                let from = self.inner.from.ok_or_else(|| ValueError::new(self.clone(), "Missing from address for deposit"))?;
+                let source_hash = self.source_hash.ok_or_else(|| ValueError::new(self.clone(), "Missing sourceHash"))?;
+                
+                let tx = TxDeposit {
+                    source_hash,
+                    from,
+                    to: self.inner.to.unwrap_or(alloy_primitives::TxKind::Create),
+                    mint: self.mint.map(|m| m.to()),
+                    value: self.inner.value.unwrap_or_default(),
+                    gas_limit: self.inner.gas.unwrap_or_default(),
+                    is_system_transaction: self.is_system_tx.unwrap_or(false),
+                    input: self.inner.input.into_input().unwrap_or_default(),
+                };
 
-            Ok(tx.into_signed(signature).into())
+                let sealed = Sealed::new_unchecked(tx, B256::ZERO);
+                return Ok(OpTxEnvelope::Deposit(sealed));
+             }
+
+             // Fallback to standard build
+             // We can try to convert this back to OpTransactionRequest or build manually.
+             // Converting inner to OpTransactionRequest might lose fields but we handled deposit above.
+             // Let's use standard typed tx builder from inner.
+             // Note: OpTransactionRequest uses `op_alloy_consensus::OpTypedTransaction` which extends Ethereum types.
+             // `TransactionRequest` builds `EthereumTxEnvelope` or `TypedTransaction`.
+             // We need `OpTxEnvelope`.
+             
+             // Simplest path: Convert inner to valid Op typed tx.
+             // However, `TransactionRequest` builder builds ETH types.
+             // We need to re-serialize/deserialize to `OpTransactionRequest` to use its builder for non-deposit types?
+             // Or construct manually.
+             
+             // Let's convert to OpTransactionRequest via serde for simplicity and correctness with Op types.
+             let val = serde_json::to_value(&self.inner).map_err(|e| ValueError::new(self.clone(), e.to_string()))?;
+             let op_req: OpTransactionRequest = serde_json::from_value(val).map_err(|e| ValueError::new(self.clone(), e.to_string()))?;
+             
+             let tx = op_req.build_typed_tx().map_err(|req| ValueError::new(self.clone(), "Failed to build op tx"))?; // clone issue here, req is OpTransactionRequest, error expects OpSimulateTransactionRequest
+             let signature = Signature::new(Default::default(), Default::default(), false);
+             Ok(tx.into_signed(signature).into())
         }
     }
+
+    /// A JSON converter for Optimism simulation transactions.
+    #[derive(Debug, Clone, Default)]
+    pub struct OpJsonSimTxConverter;
+
+    impl JsonSimTxConverter<OpTxEnvelope> for OpJsonSimTxConverter {
+        type Error = ValueError<OpSimulateTransactionRequest>;
+
+        fn convert_json_sim_tx(&self, request: serde_json::Value) -> Result<OpTxEnvelope, Self::Error> {
+             let req: OpSimulateTransactionRequest = serde_json::from_value(request)
+                .map_err(|e| ValueError::new(OpSimulateTransactionRequest::default(), e.to_string()))?;
+             req.try_into_sim_tx()
+        }
+    }
+
 }
 
 /// Trait for converting network transaction responses to primitive transaction types.
@@ -1042,5 +1204,35 @@ mod transaction_response_tests {
 
             assert!(result.is_ok());
         }
+
+        #[test]
+        fn test_deposit_tx_conversion_simulate() {
+            use alloy_primitives::{Address, B256, U256, U128};
+            use crate::transaction::op::OpSimulateTransactionRequest;
+            use crate::transaction::TryIntoSimTx;
+
+            let json = serde_json::json!({
+                "from": Address::ZERO,
+                "type": "0x7e", // 126
+                "mint": "0x64", // 100
+                "source_hash": B256::ZERO,
+                "is_system_tx": true
+            });
+            let request: OpSimulateTransactionRequest = serde_json::from_value(json).unwrap();
+            eprintln!("Serialized Request: {}", serde_json::to_string(&request).unwrap());
+
+            let envelope = request.try_into_sim_tx().unwrap();
+            
+            match envelope {
+                op_alloy_consensus::OpTxEnvelope::Deposit(tx) => {
+                    assert_eq!(tx.mint, 100);
+                    assert_eq!(tx.source_hash, B256::ZERO);
+                    assert!(tx.is_system_transaction);
+                    assert_eq!(tx.from, Address::ZERO);
+                }
+                _ => panic!("Expected Deposit transaction"),
+            }
+        }
+
     }
 }

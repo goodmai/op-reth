@@ -34,169 +34,41 @@
 
 ---
 
-## 2. Декомпозиция задач (Tasks)
+## 2. Tasks
 
-### Task 1: Интеграция расширенных типов RPC (Data Layer)
+### Task 1: Data & Logic Layer Implementation (`crates/rpc/rpc-convert`)
 
-**Приоритет:** Blocker
-**Сложность:** Low
-**Файлы:** `crates/rpc/rpc-types/src/eth/transaction/` (или локально в модуле simulate).
+**Priority:** Critical
+**Files:** `crates/rpc/rpc-convert/src/transaction.rs`
 
-**Описание:**
-Метод `eth_simulateV1` должен уметь принимать JSON с полями депозита.
+- [ ] **[NEW]** Define `OpSimulateTransactionRequest` local struct:
+    - Include standard transaction fields.
+    - Include Deposit-specific fields (`mint`, `source_hash`, `is_system_tx`).
+    - Use `serde` for flexible deserialization.
+- [ ] **[MODIFY]** Implement `TryIntoSimTx<OpTxEnvelope>` for `OpSimulateTransactionRequest`.
+- [ ] **[MODIFY]** Update `RpcConvert` trait:
+    - Add `fn build_simulate_v1_transaction_from_json`.
+- [ ] **[MODIFY]** Implement `build_simulate_v1_transaction_from_json` for `OpRpcConvert`.
 
-1. Проверить наличие крейта `op-alloy-rpc-types` в зависимостях. Если нет — добавить.
-2. Если использование `op-alloy` невозможно из-за конфликтов версий, объявить локальную структуру-обертку.
+### Task 2: Orchestration Layer Integration (`crates/rpc`)
 
-**Техническая реализация:**
+**Priority:** High
+**Files:** `rpc-eth-api/src/core.rs`, `rpc-eth-api/src/helpers/call.rs`, `rpc-eth-types/src/simulate.rs`
 
-```rust
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OpSimulateTransactionRequest {
-    #[serde(flatten)]
-    pub inner: TransactionRequest, // Стандартные поля
-    pub mint: Option<U128>,        // Optimism specific
-    #[serde(rename = "sourceHash")]
-    pub source_hash: Option<B256>, // Optimism specific
-    #[serde(rename = "isSystemTx")]
-    pub is_system_tx: Option<bool>,
-}
+- [ ] **[MODIFY]** Update `EthApi::simulate_v1` signature check to accept `SimulatePayload<serde_json::Value>`.
+- [ ] **[MODIFY]** Update `EthCall::simulate_v1` signature and implementation.
+- [ ] **[MODIFY]** Update `execute_transactions` in `rpc-eth-types` to accept `Vec<serde_json::Value>` and use the JSON converter.
 
-```
+### Task 3: EVM Layer Configuration
 
-**DoD (Definition of Done):**
+**Priority:** High
+**Files:** `crates/optimism/evm`
 
-* [ ] Структура `OpSimulateTransactionRequest` компилируется.
-* [ ] Написан Unit-тест: JSON строка с `sourceHash` успешно десериализуется, поле доступно в Rust.
-* [ ] Поля `mint` и `sourceHash` корректно маппятся в `Option`.
+- [ ] Verify `TxDeposit` execution environment (gas price, balance checks) handles system transactions correctly.
 
----
+### Task 4: Verification
 
-### Task 2: Реализация конвертера `OpTxBuilder` (Logic Layer)
+**Priority:** Medium
 
-**Приоритет:** Critical
-**Сложность:** High
-**Файлы:** `crates/rpc/rpc-eth-api/src/helpers/call.rs` (или аналогичный в `optimism` feature).
+- [ ] Add E2E Test for Optimism Deposit Simulation.
 
-**Описание:**
-Необходимо научить ноду преобразовывать "сырой" RPC запрос в примитив транзакции, понятный движку Reth, **без валидации подписи**.
-
-**Техническая реализация:**
-
-1. Создать функцию-хелпер `try_build_deposit_tx`.
-2. Логика:
-* Если `tx_type != 0x7E`, вернуть `None` (пусть обрабатывается стандартно).
-* Если `0x7E`:
-* Проверить наличие `from` (обязательно).
-* Сконструировать `reth_optimism_primitives::DepositTransaction`.
-* Обернуть в `TransactionSigned` (с пустым полем signature).
-* Вернуть `Recovered<TransactionSigned>` где `signer` явно установлен в `req.from`.
-
-
-
-
-
-**DoD:**
-
-* [ ] Функция `try_build_deposit_tx` реализована и компилируется.
-* [ ] Unit-тест: На вход подается Request с типом `0x7E`, на выходе — `Recovered` транзакция с корректным адресом отправителя.
-* [ ] Отсутствуют вызовы `ecrecover` внутри этого флоу.
-
----
-
-### Task 3: Интеграция в пайплайн `simulate_v1` (Orchestration)
-
-**Приоритет:** Critical
-**Сложность:** Medium
-**Файлы:** `crates/rpc/rpc-eth-api/src/eth_api.rs` (метод `simulate_v1`).
-
-**Описание:**
-Заменить стандартный итератор по транзакциям на логику, поддерживающую ветвление.
-
-**Техническая реализация:**
-В цикле обработки транзакций `SimulateV1Request`:
-
-```rust
-let tx = if request.is_deposit() {
-    Self::try_build_deposit_tx(request)? // Логика из Task 2
-} else {
-    // Стандартная логика с recover_signer
-    TransactionRequest::try_into_recovered(request)?
-};
-
-```
-
-*Важно:* Убедиться, что `OpEvmConfig` используется для создания EVM, иначе новые поля транзакции будут проигнорированы при исполнении.
-
-**DoD:**
-
-* [ ] Проект компилируется целиком (`cargo check`).
-* [ ] Интеграция не ломает существующие тесты для Legacy транзакций (Run `cargo test -p reth-rpc`).
-
----
-
-### Task 4: Обработка системных транзакций и Газа (EVM Layer)
-
-**Приоритет:** Medium
-**Сложность:** High
-**Файлы:** `crates/optimism/evm/src/lib.rs` (конфигурация `TxEnv`).
-
-**Описание:**
-Обеспечить корректное исполнение L1 Attributes транзакций (обновление L2 состояния).
-
-**Техническая реализация:**
-
-1. При конфигурации `TxEnv` для `revm`:
-* Если `tx.is_system_transaction`:
-* Установить `env.tx.gas_price = 0`.
-* Установить `env.cfg.disable_balance_check = true` (или `disable_block_gas_limit`).
-
-
-
-
-2. Для `mint` операций: убедиться, что `revm` корректно начисляет баланс на `to` адрес перед исполнением (или в процессе, если это нативная функция OP-стека).
-
-**DoD:**
-
-* [ ] Unit-тест: Симуляция транзакции с `isSystemTx: true` от адреса с балансом 0 проходит успешно (Success), а не падает с ошибкой `OutOfFunds`.
-
----
-
-### Task 5: Финальное E2E Тестирование
-
-**Приоритет:** High
-**Сложность:** Medium
-**Файлы:** `tests/it/rpc/simulate.rs`.
-
-**Описание:**
-Проверка всего сценария целиком.
-
-**Сценарий теста:**
-
-1. **Setup:** Запустить `Reth` с флагом `optimism`.
-2. **Action:** Вызвать `eth_simulateV1` с массивом из одной транзакции:
-* `type`: "0x7E"
-* `mint`: "1000000000000000000" (1 ETH)
-* `to`: "0x123..."
-* `sourceHash`: "0x..."
-
-
-3. **Assert:**
-* RPC возвращает статус Success.
-* В поле `balanceChanges` для адреса `0x123...` видно увеличение на 1 ETH.
-
-
-
-**DoD:**
-
-* [ ] Тест проходит (`PASSED`).
-* [ ] Отсутствуют паники в логах ноды.
-
----
-
-## Резюме для разработчика
-
-Я рекомендую начать с **Task 1**, так как без корректного парсинга JSON дальнейшая работа бессмысленна. Сразу после этого переходите к **Task 2** и **Task 3** в связке — это ядро функционала. Task 4 можно дорабатывать итеративно, проверяя корректность списания газа.
-
-**Команда:**
-`cargo test --package reth-rpc-eth-api` — ваша главная команда на ближайшие дни.

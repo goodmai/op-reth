@@ -35,6 +35,7 @@ reth-optimism-primitives = { workspace = true, optional = true }
 
 # io
 jsonrpsee-types.workspace = true
+serde_json.workspace = true
 
 # error
 thiserror.workspace = true

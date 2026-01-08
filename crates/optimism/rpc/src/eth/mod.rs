@@ -37,8 +37,8 @@ use reth_rpc_eth_api::{
         pending_block::BuildPendingEnv, EthApiSpec, EthFees, EthState, LoadFee, LoadPendingBlock,
         LoadState, SpawnBlocking, Trace,
     },
-    EthApiTypes, FromEvmError, FullEthApiServer, RpcConvert, RpcConverter, RpcNodeCore,
-    RpcNodeCoreExt, RpcTypes,
+    EthApiTypes, FromEvmError, FullEthApiServer, OpJsonSimTxConverter, RpcConvert, RpcConverter,
+    RpcNodeCore, RpcNodeCoreExt, RpcTypes,
 };
 use reth_rpc_eth_types::{
     logs_utils::matching_block_logs_with_tx_hashes, EthStateCache, FeeHistoryCache, GasPriceOracle,
@@ -561,7 +561,8 @@ where
         } = self;
         let rpc_converter =
             RpcConverter::new(OpReceiptConverter::new(ctx.components.provider().clone()))
-                .with_mapper(OpTxInfoMapper::new(ctx.components.provider().clone()));
+                .with_mapper(OpTxInfoMapper::new(ctx.components.provider().clone()))
+                .with_json_sim_tx_converter(OpJsonSimTxConverter::default());
 
         let sequencer_client = if let Some(url) = sequencer_url {
             Some(

@@ -41,6 +41,7 @@ use revm::{
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
 use tracing::{trace, warn};
+use serde_json::Value;
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
@@ -64,7 +65,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     /// See also: <https://github.com/ethereum/go-ethereum/pull/27720>
     fn simulate_v1(
         &self,
-        payload: SimulatePayload<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>,
+        payload: SimulatePayload<Value>,
         block: Option<BlockId>,
     ) -> impl Future<Output = SimulatedBlocksResult<Self::NetworkTypes, Self::Error>> + Send {
         async move {
@@ -135,10 +136,20 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     let chain_id = evm_env.cfg_env.chain_id;
 
                     let default_gas_limit = {
-                        let total_specified_gas =
-                            calls.iter().filter_map(|tx| tx.as_ref().gas_limit()).sum::<u64>();
-                        let txs_without_gas_limit =
-                            calls.iter().filter(|tx| tx.as_ref().gas_limit().is_none()).count();
+                        let total_specified_gas = calls.iter().filter_map(|tx| {
+                             tx.get("gas").or_else(|| tx.get("gasLimit"))
+                               .and_then(|v| {
+                                   if let Some(n) = v.as_u64() { Some(n) }
+                                   else if let Some(s) = v.as_str() {
+                                       if s.starts_with("0x") { u64::from_str_radix(&s[2..], 16).ok() }
+                                       else { s.parse().ok() }
+                                   } else { None }
+                               })
+                        }).sum::<u64>();
+                        
+                        let txs_without_gas_limit = calls.iter().filter(|tx| {
+                             tx.get("gas").is_none() && tx.get("gasLimit").is_none()
+                        }).count();
 
                         if total_specified_gas > block_gas_limit {
                             return Err(EthApiError::Other(Box::new(

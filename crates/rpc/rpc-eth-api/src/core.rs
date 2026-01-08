@@ -226,7 +226,7 @@ pub trait EthApi<
     #[method(name = "simulateV1")]
     async fn simulate_v1(
         &self,
-        opts: SimulatePayload<TxReq>,
+        opts: SimulatePayload<serde_json::Value>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<B>>>;
 
@@ -674,7 +674,7 @@ where
     /// Handler for: `eth_simulateV1`
     async fn simulate_v1(
         &self,
-        payload: SimulatePayload<RpcTxReq<T::NetworkTypes>>,
+        payload: SimulatePayload<serde_json::Value>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<T::NetworkTypes>>>> {
         trace!(target: "rpc::eth", ?block_number, "Serving eth_simulateV1");

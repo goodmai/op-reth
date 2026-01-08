@@ -12,24 +12,154 @@ use alloy_rpc_types_eth::{
     BlockTransactionsKind,
 };
 use jsonrpsee_types::ErrorObject;
-use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
-    Evm, HaltReasonFor,
-};
-use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
-use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
-use reth_rpc_server_types::result::rpc_err;
-use reth_storage_api::noop::NoopProvider;
-use revm::{
-    context::Block,
-    context_interface::result::ExecutionResult,
-    primitives::{Address, Bytes, TxKind, U256},
-    Database,
-};
+use serde_json::{json, Value};
 
-/// Errors which may occur during `eth_simulateV1` execution.
-#[derive(Debug, thiserror::Error)]
-pub enum EthSimulateError {
+/// Converts all [`TransactionRequest`]s into [`Recovered`] transactions and applies them to the
+/// given [`BlockExecutor`].
+///
+/// Returns all executed transactions and the result of the execution.
+///
+/// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
+#[expect(clippy::type_complexity)]
+pub fn execute_transactions<S, T>(
+    mut builder: S,
+    calls: Vec<Value>,
+    default_gas_limit: u64,
+    chain_id: u64,
+    converter: &T,
+) -> Result<
+    (
+        BlockBuilderOutcome<S::Primitives>,
+        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+    ),
+    EthApiError,
+>
+where
+    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    T: RpcConvert<Primitives = S::Primitives>,
+{
+    builder.apply_pre_execution_changes()?;
+
+    let mut results = Vec::with_capacity(calls.len());
+    for call in calls {
+        // Resolve transaction, populate missing fields and enforce calls
+        // correctness.
+        let tx = resolve_transaction(
+            call,
+            default_gas_limit,
+            builder.evm().block().basefee(),
+            chain_id,
+            builder.evm_mut().db_mut(),
+            converter,
+        )?;
+        // Create transaction with an empty envelope.
+        // The effect for a layer-2 execution client is that it does not charge L1 cost.
+        let tx = WithEncoded::new(Default::default(), tx);
+
+        builder
+            .execute_transaction_with_result_closure(tx, |result| results.push(result.clone()))?;
+    }
+
+    // Pass noop provider to skip state root calculations.
+    let result = builder.finish(NoopProvider::default())?;
+
+    Ok((result, results))
+}
+
+/// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
+/// them into primitive transactions.
+///
+/// This will set the defaults as defined in <https://github.com/ethereum/execution-apis/blob/e56d3208789259d0b09fa68e9d8594aa4d73c725/docs/ethsimulatev1-notes.md#default-values-for-transactions>
+///
+/// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
+pub fn resolve_transaction<DB: Database, Tx, T>(
+    mut tx: Value,
+    default_gas_limit: u64,
+    block_base_fee_per_gas: u64,
+    chain_id: u64,
+    db: &mut DB,
+    converter: &T,
+) -> Result<Recovered<Tx>, EthApiError>
+where
+    DB::Error: Into<EthApiError>,
+    T: RpcConvert<Primitives: NodePrimitives<SignedTx = Tx>>,
+{
+    // Helper to get address from Value
+    let get_address = |val: &Value, key: &str| -> Option<Address> {
+        val.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+    };
+
+    // Helper to get u64 from Value
+    let get_u64 = |val: &Value, key: &str| -> Option<u64> {
+        val.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+    };
+
+     // Helper to get u128 from Value
+    let get_u128 = |val: &Value, key: &str| -> Option<u128> {
+        val.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+    };
+
+    let from = if let Some(addr) = get_address(&tx, "from") {
+        addr
+    } else {
+        tx["from"] = json!(Address::ZERO);
+        Address::ZERO
+    };
+
+    if tx.get("nonce").is_none() {
+        let nonce = db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default();
+        tx["nonce"] = json!(U64::from(nonce));
+    }
+
+    if tx.get("gas").is_none() && tx.get("gasLimit").is_none() {
+         tx["gas"] = json!(U256::from(default_gas_limit));
+    }
+
+    if tx.get("chainId").is_none() {
+        tx["chainId"] = json!(U64::from(chain_id));
+    }
+
+    // Kind (to) is implicitly handled by presence/absence of "to".
+    // rpc-convert likely handles "to": null as Create.
+
+    // Fee logic
+    // Check type
+    let tx_type = get_u64(&tx, "type");
+    let is_eip1559_or_access_list = tx_type.map(|t| t == 1 || t == 2).unwrap_or(false);
+    let is_legacy = tx_type.map(|t| t == 0).unwrap_or(true); // Default to legacy if no type? Or EIP-1559?
+    // Actually modern defaults usually assume EIP-1559 if fees are appropriate, but here strict rules apply.
+
+    // If type is explicitly Legacy (0) or EIP-2930 (1) or missing (defaults to legacy compatible if gasPrice present?)
+    // Note: output_tx_type_checked logic in alloy is complex.
+    // Simplifying: if gasPrice is missing, set based on type.
+
+    if tx.get("gasPrice").is_none() && tx.get("maxFeePerGas").is_none() && tx.get("maxPriorityFeePerGas").is_none() {
+        // No fees specified.
+        if is_legacy {
+             tx["gasPrice"] = json!(U256::from(block_base_fee_per_gas));
+        } else {
+             // EIP-1559
+             tx["maxFeePerGas"] = json!(U256::from(block_base_fee_per_gas));
+             tx["maxPriorityFeePerGas"] = json!(U256::ZERO);
+        }
+    } else {
+        // Partial fees?
+        if let Some(_) = tx.get("maxFeePerGas") {
+            if tx.get("maxPriorityFeePerGas").is_none() {
+                tx["maxPriorityFeePerGas"] = json!(U256::ZERO);
+            }
+        } else if let Some(_) = tx.get("gasPrice") {
+             // Legacy, fine.
+        }
+    }
+    
+    // For SystemTx (Optimism), fields might differ, but setting defaults shouldn't hurt if ignored.
+
+    let tx = converter.build_simulate_v1_transaction_from_json(tx)
+        .map_err(|e| EthApiError::other(e.into()))?;
+
+    Ok(Recovered::new_unchecked(tx, from))
+}
     /// Total gas limit of transactions for the block exceeds the block gas limit.
     #[error("Block gas limit exceeded by the block's transactions")]
     BlockGasLimitExceeded,
