@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event.repository.fork == false
     name: test / ${{ matrix.type }} (${{ matrix.partition }}/${{ matrix.total_partitions }})
     runs-on: depot-ubuntu-latest-4
     env:
@@ -65,6 +66,7 @@ jobs:
             -E "!kind(test) and not binary(e2e_testsuite)"
 
   state:
+    if: github.event.repository.fork == false
     name: Ethereum state tests
     runs-on: depot-ubuntu-latest-4
     env:
@@ -100,6 +102,7 @@ jobs:
       - run: cargo nextest run --release -p ef-tests --features "asm-keccak ef-tests"
 
   doc:
+    if: github.event.repository.fork == false
     name: doc tests
     runs-on: depot-ubuntu-latest
     env:
@@ -119,7 +122,7 @@ jobs:
   unit-success:
     name: unit success
     runs-on: ubuntu-latest
-    if: always()
+    if: github.event.repository.fork == false && always()
     needs: [test, state, doc]
     timeout-minutes: 30
     steps:
